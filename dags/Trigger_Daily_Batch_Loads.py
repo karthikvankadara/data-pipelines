@@ -1,19 +1,21 @@
 from airflow import DAG
-from datetime import datetime, timedelta
-from airflow.operators.dummy_operator import DummyOperator
-from airflow.operators.python_operator import BranchPythonOperator, PythonOperator
-import logging
-from google.cloud import storage, bigquery
-from airflow.contrib.operators.bigquery_operator import BigQueryOperator
-from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
 from airflow.models import Variable
 import pendulum
+from datetime import datetime, timedelta
+from airflow.operators.dummy_operator import DummyOperator
+from airflow.operators.python_operator import BranchPythonOperator
+from airflow.providers.google.cloud.transfers.gcs_to_bigquery import GCSToBigQueryOperator
+from airflow.providers.google.cloud.transfers.gcs_to_gcs import GCSToGCSOperator
+from airflow.providers.google.cloud.operators.bigquery import BigQueryInsertJobOperator
 from airflow.operators.subdag_operator import SubDagOperator
 from airflow.utils.weight_rule import WeightRule
+from google.cloud import storage
 
 config = Variable.get(
     "etl_config", deserialize_json=True
 )
+
+query = "{% include '$sql_script.sql' %}"
 
 DATA_IMPORT_TABLES_LIST = Variable.get("data_import_tables_list")
 SOURCE_BUCKET = config["Source_Bucket"]
@@ -34,9 +36,17 @@ default_args = {
     'retry_delay': timedelta(minutes=5)
 }
 
+# params dictionary would be used in the BigQueryInsertJobOperator to pass parameters
+# in the sql file for transforming the staging data
+params = {
+    "Project_ID":PROJECT_ID,
+    "Staging_Dataset":STAGING_DATASET,
+    "Target_Dataset":TARGET_DATASET
+}
+
 # Helper methods for subdag and subtask creation
 def create_sub_dag(parent_dag_name, child_dag_name, start_date, schedule_interval, template_searchpath):
-  ''''Returns a DAG which has the dag_id formatted as parent.child '''
+  ''' Returns a DAG which has the dag_id formatted as parent.child '''
   return DAG(
     dag_id='{}.{}'.format(parent_dag_name, child_dag_name),
     schedule_interval=schedule_interval,
@@ -47,6 +57,8 @@ def create_sub_dag(parent_dag_name, child_dag_name, start_date, schedule_interva
   )
 
 def _branch(file_pattern):
+    ''' Checks to see if given table's load files are present in the landing folder '''
+    # look for files with table_name pattern
     prefix = '{}/{}'.format(STAGING_FOLDER,file_pattern)
     print(prefix)
     client = storage.Client(PROJECT_ID)
@@ -57,8 +69,9 @@ def _branch(file_pattern):
     else:
         return 'load_csv_to_staging'  
 
-# list of all the tasks under the sub dags
-def create_tasks(level1_dag, table):
+
+def create_tasks(level1_dag, table_name):
+    ''' Contains the list of tasks to be performed for each table load '''
     start = DummyOperator(task_id="start", dag = level1_dag)
     
     end = DummyOperator(task_id="end", trigger_rule="one_success", dag = level1_dag)
@@ -68,26 +81,49 @@ def create_tasks(level1_dag, table):
     check_for_data_file = BranchPythonOperator(
         task_id = "check_for_data_file",
         python_callable= _branch,
-        op_kwargs={"file_pattern":"{}".format(table)},
+        op_kwargs={"file_pattern":"{}".format(table_name)},
         dag = level1_dag
     )
 
     load_csv_to_staging = GCSToBigQueryOperator(
         task_id='load_csv_to_staging',
         bucket=SOURCE_BUCKET,
-        source_objects=["{}/{}_*.csv".format(STAGING_FOLDER, table)],
-        destination_project_dataset_table='{}.{}.{}_stg'.format(PROJECT_ID,STAGING_DATASET, table),
+        source_objects=["{}/{}_*.csv".format(STAGING_FOLDER, table_name)],
+        destination_project_dataset_table='{}.{}.{}_stg'.format(PROJECT_ID,STAGING_DATASET, table_name),
         create_disposition="CREATE_IF_NEEDED",
         write_disposition="WRITE_TRUNCATE",
-        schema_object="schema_stg/{}_stg.json".format(table),        
+        schema_object="schema_stg/{}_stg.json".format(table_name),        
         source_format="CSV",
         skip_leading_rows=1,
         autodetect=False,
         dag = level1_dag
     )
 
+    load_target_table = BigQueryInsertJobOperator(
+        task_id="load_target_table",
+        configuration={
+            "query":{
+                "query":query.replace("$sql_script",table_name),
+                "useLegacySql":False
+            }
+        },
+        params=params,
+        dag=level1_dag
+    )    
+
+    move_files_to_archive =  GCSToGCSOperator(
+        task_id="move_files_to_archive",
+        move_object=True, 
+        source_bucket=SOURCE_BUCKET,
+        destination_bucket=SOURCE_BUCKET,
+        source_object="{}/{}".format(STAGING_FOLDER, table_name),
+        destination_object="{}/".format(ARCHIVE_FOLDER),
+        dag = level1_dag        
+    )
+
+
     start >> check_for_data_file >> [load_csv_to_staging, no_file_exists]
-    load_csv_to_staging >> end
+    load_csv_to_staging >> load_target_table >> move_files_to_archive >> end
     no_file_exists >> end        
 
 #Top DAG
@@ -100,7 +136,7 @@ dag = DAG(
 )
 
 with dag:
-# Top dag Initial Task
+    # Top DAG Initial Task
     start = DummyOperator(task_id="start")
 
     daily_load_tables_list = DATA_IMPORT_TABLES_LIST.split(',')
