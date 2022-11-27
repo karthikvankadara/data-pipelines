@@ -1,0 +1,9 @@
+steps:
+#deploy dag files
+- name: 'gcr.io/cloud-builders/gsutil'
+  args: ['-m', 'cp', '-r', 'sql/*', 'gs://us-central1-dag-location/' ]
+#deploy Python code
+- name: 'gcr.io/cloud-builders/gcloud'
+  entrypoint: 'bash'
+  args: ['deploy_sql.sh', '$PROJECT_ID', '${_SECRET_NAME}', '${STG_DATASET}']
+timeout: 1200s

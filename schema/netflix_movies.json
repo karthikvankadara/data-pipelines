@@ -1,3 +1,22 @@
-{
-    "name":"Andor"
-}
+[
+    {
+        "name": "Title",
+        "type": "STRING"
+    },
+    {
+        "name": "Genre",
+        "type": "STRING"
+    },
+    {
+        "name": "Premiere",
+        "type": "STRING"
+    },
+    {
+        "name": "Runtime",
+        "type": "STRING"
+    },
+    {
+        "name": "Language",
+        "type": "STRING"
+    }
+]    
