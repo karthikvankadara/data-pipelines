@@ -11,7 +11,7 @@ deployment_status=0
 bq_deploy(){
     #replacing project ids depending on the environment variable
     sed -i "s/gcp-wow-xxx/$project_id/g" "$file_entry"
-    sed it "s/movies_stg/$stg_dataset/g" "$file_entry"
+    sed -i "s/movies_stg/$stg_dataset/g" "$file_entry"
 
     query="$(cat $file_entry)"
     bq query --batch --use_legacy_sql=false "${query//<project_id>/$project_id}"
