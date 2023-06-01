@@ -1,0 +1,38 @@
+trigger: none
+
+pool:
+  vmImage: "ubuntu-latest"
+
+parameters:
+  - name: environment
+    displayName: 'Environment'
+    type: string
+    default: 'dev'
+    values:
+      - dev
+      - prod  
+
+variables:
+  - name: projectName
+    ${{ if eq(parameters.environment, 'prod') }}:
+      value: "gcp-mcu-prod"
+    ${{ if eq(parameters.environment, 'dev') }}:
+      value: "gcp-mcu-dev"
+  - name: gcpServiceAccount
+    ${{ if eq(parameters.environment, 'prod') }}:
+      value: "gcp-mcu-sa-prod.json"
+    ${{ if eq(parameters.environment, 'dev') }}:
+      value: "gcp-mcu-sa-dev.json"     
+
+steps:
+  - checkout: self
+    path: cloud_functions/gcp-mcu-prod
+  - task: DownloadSecureFile@1
+    name: gcpServiceAccount
+    inputs:
+      secureFile: '$(gcpServiceAccount)' #This service key is injected through azure devops SecureFiles
+  - script: gcloud auth activate-service-account --key-file=$(gcpServiceAccount.secureFilePath) && gcloud config set project $(projectName)
+    displayName: Authenticate Service Account
+  - script: gcloud functions deploy trigger_bq_scripts --runtime python39 --trigger-bucket mcu_data_landing_${{parameters.environment}} --memory 4096MB --entry-point main --set-secrets 'SA_THANOS_SECRET=projects/$(projectName)/secrets/sa-thanos-secret:latest' --project $(projectName) --source .
+    workingDirectory: $(Build.Repository.LocalPath)/cloud_functions/trigger_bq_scripts
+    displayName: Deploy Cloud Function
